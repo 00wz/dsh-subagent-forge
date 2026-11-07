@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Subagent forge",
+    "description": "Start subagents with a per-child system prompt, a model from your allowlist, a reasoning effort, and an explicit grant to delegate further."
+  }
+}

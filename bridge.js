@@ -74,6 +74,9 @@ export function apply (ctx) {
       if (path === '/config' && req.method === 'POST') {
         try {
           const body = await readBody(req)
+          if (body?.value === null || typeof body?.value !== 'object' || Array.isArray(body.value)) {
+            return send(res, 400, { error: 'the request body must be {"value": {…}}' })
+          }
           return send(res, 200, { value: reconfigure(body.value) })
         } catch (error) {
           return send(res, 400, { error: `invalid configuration: ${error.message}` })

@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "dsh-subagent-forge",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "description": "Configurable subagents for DeepSeek Harness: a per-child system prompt, a model allowlist with descriptions, reasoning effort, and an explicit per-launch delegation grant.",
   "license": "MIT",

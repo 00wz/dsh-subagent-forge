@@ -1,10 +1,11 @@
 window.__ModuleLoader__.load({
-  id: '@local/subagent-forge',
+  id: 'dsh-subagent-forge',
   factory(require) {
     const React = require('react')
     const h = React.createElement
 
     const ENDPOINT = '/subagent-forge/config'
+    const CATALOG = '/subagent-forge/catalog'
 
     const DICT_EN = {
       tab: 'Subagent forge',
@@ -13,6 +14,11 @@ window.__ModuleLoader__.load({
       route: 'Route',
       description: 'Description for the agent',
       add: 'Add model',
+      discover: 'Add models from my providers',
+      discovering: 'Reading providers…',
+      discovered: 'Added the models your providers advertise.',
+      noneNew: 'Every advertised model is already in the list.',
+      discoverFailed: 'Could not read the provider catalog.',
       remove: 'Remove',
       grantHint: 'A delegation grant is given per launch: the agent states it on every call, and there is no default.',
       save: 'Save',
@@ -33,6 +39,11 @@ window.__ModuleLoader__.load({
       route: 'Маршрут',
       description: 'Описание для агента',
       add: 'Добавить модель',
+      discover: 'Добавить модели из провайдеров',
+      discovering: 'Читаем провайдеров…',
+      discovered: 'Добавлены модели, которые объявляют ваши провайдеры.',
+      noneNew: 'Все объявленные модели уже в списке.',
+      discoverFailed: 'Не удалось прочитать каталог провайдеров.',
       remove: 'Удалить',
       grantHint: 'Право делегирования выдаётся на каждый запуск отдельно: его указывают в каждом вызове, значения по умолчанию нет.',
       save: 'Сохранить',
@@ -79,6 +90,19 @@ window.__ModuleLoader__.load({
       error: { fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' },
     }
 
+    /** Same normalization as the plugin, so the saved value compares equal. */
+    function normalize(list) {
+      const seen = new Set()
+      const out = []
+      for (const model of list ?? []) {
+        const route = (model.route ?? '').trim()
+        if (route.length === 0 || seen.has(route)) continue
+        seen.add(route)
+        out.push({ route, description: model.description ?? '' })
+      }
+      return out
+    }
+
     function Page(props) {
       const t = props.t
       const [state, setState] = React.useState({ phase: 'loading', value: null, dirty: false, message: '', error: '' })
@@ -118,6 +142,30 @@ window.__ModuleLoader__.load({
         }))
       }
 
+      const discover = async () => {
+        setState((prev) => ({ ...prev, phase: 'discovering', error: '', message: '' }))
+        try {
+          const response = await fetch(CATALOG, { headers: { accept: 'application/json' } })
+          const body = await response.json().catch(() => ({}))
+          if (!response.ok) throw new Error(body.error || `${response.status}`)
+          setState((prev) => {
+            const models = prev.value.models ?? []
+            const known = new Set(models.map((model) => (model.route ?? '').trim()))
+            const added = (body.value?.models ?? []).filter((model) => !known.has(model.route))
+            return {
+              ...prev,
+              phase: 'ready',
+              value: { ...prev.value, models: [...models, ...added] },
+              dirty: prev.dirty || added.length > 0,
+              message: added.length === 0 ? t('noneNew') : t('discovered'),
+              error: '',
+            }
+          })
+        } catch (error) {
+          setState((prev) => ({ ...prev, phase: 'ready', error: `${t('discoverFailed')} ${error.message}` }))
+        }
+      }
+
       const save = async () => {
         setState((prev) => ({ ...prev, phase: 'saving', error: '' }))
         const sent = state.value
@@ -134,7 +182,7 @@ window.__ModuleLoader__.load({
             const fresh = await fetch(ENDPOINT, { headers: { accept: 'application/json' } })
             if (!fresh.ok) continue
             const next = await fresh.json()
-            const sameModels = JSON.stringify(next.value?.models) === JSON.stringify(sent.models)
+            const sameModels = JSON.stringify(normalize(next.value?.models)) === JSON.stringify(normalize(sent.models))
             if (sameModels) {
               setState({ phase: 'ready', value: next.value, dirty: false, message: t('saved'), error: '' })
               return
@@ -155,6 +203,7 @@ window.__ModuleLoader__.load({
 
       const models = state.value.models ?? []
       const saving = state.phase === 'saving'
+      const busy = saving || state.phase === 'discovering'
 
       return h('div', { style: S.page },
         h('div', { style: S.card },
@@ -165,7 +214,7 @@ window.__ModuleLoader__.load({
             h('input', {
               style: { ...S.input, ...S.inputNarrow },
               value: model.route ?? '',
-              placeholder: 'polza/deepseek/deepseek-v4.1-flash-1017',
+              placeholder: 'provider/model',
               'aria-label': t('route'),
               onChange: (event) => setModel(index, { route: event.target.value }),
             }),
@@ -178,14 +227,16 @@ window.__ModuleLoader__.load({
             }),
             h('button', { type: 'button', style: S.ghost, onClick: () => removeModel(index) }, t('remove')))),
           h('div', { style: S.row },
-            h('button', { type: 'button', style: S.button, onClick: addModel }, t('add')))),
+            h('button', { type: 'button', style: S.button, onClick: addModel, disabled: busy }, t('add')),
+            h('button', { type: 'button', style: S.ghost, onClick: discover, disabled: busy },
+              state.phase === 'discovering' ? t('discovering') : t('discover')))),
         h('div', { style: S.card },
           h('p', { style: S.hint }, t('grantHint'))),
         h('div', { style: S.row },
           h('button', {
             type: 'button',
-            style: { ...S.buttonPrimary, opacity: state.dirty && !saving ? 1 : 0.55, cursor: state.dirty && !saving ? 'pointer' : 'default' },
-            disabled: !state.dirty || saving,
+            style: { ...S.buttonPrimary, opacity: state.dirty && !busy ? 1 : 0.55, cursor: state.dirty && !busy ? 'pointer' : 'default' },
+            disabled: !state.dirty || busy,
             onClick: save,
           }, saving ? t('saving') : t('save')),
           state.error ? h('span', { style: S.error }, state.error) : null,

@@ -2,8 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import z from '@deepseek-ai/schemastery'
-import { defineTool } from '@deepseek-ai/dsh-tools'
 
 /** Cordis plugin name. */
 export const name = 'subagent-forge'
@@ -11,24 +9,55 @@ export const name = 'subagent-forge'
 /** Services this plugin requires. */
 export const inject = ['tools', 'subagents', 'systemPrompt', 'agents']
 
-/**
- * User-editable configuration. The settings page edits the same fields and
- * stores them beside the child specs, so an edit survives a restart.
- */
-export const Config = z.object({
-  toolName: z.string().default('spawn_agent'),
-  forkToolName: z.string().default('fork_agent'),
-  subagentProvider: z.string().default('spawn'),
-  forkProvider: z.string().default('fork'),
-  blockBuiltinDelegation: z.boolean().default(true),
-  blockedTools: z.array(z.string()).default(['subagent', 'subagent_fork']),
-  models: z.array(z.object({
-    route: z.string().required(),
-    description: z.string().default(''),
-  })).default([]),
-  extraDelegationTools: z.array(z.string()).default(['workflow']),
-  emptyPrompt: z.string().default('Begin the task described in your system prompt.'),
-})
+/** Default user-editable configuration. */
+const DEFAULTS = {
+  toolName: 'spawn_agent',
+  forkToolName: 'fork_agent',
+  subagentProvider: 'spawn',
+  forkProvider: 'fork',
+  blockBuiltinDelegation: true,
+  blockedTools: ['subagent', 'subagent_fork'],
+  models: [],
+  extraDelegationTools: ['workflow'],
+  emptyPrompt: 'Begin the task described in your system prompt.',
+}
+
+const STRING_FIELDS = ['toolName', 'forkToolName', 'subagentProvider', 'forkProvider', 'emptyPrompt']
+const NAME_LIST_FIELDS = ['blockedTools', 'extraDelegationTools']
+
+/** Keep only usable allowlist rows: a non-blank route, first occurrence wins. */
+function normalizeModels (models) {
+  const seen = new Set()
+  const next = []
+  for (const entry of Array.isArray(models) ? models : []) {
+    const route = typeof entry?.route === 'string' ? entry.route.trim() : ''
+    if (route.length === 0 || seen.has(route)) continue
+    seen.add(route)
+    next.push({ route, description: typeof entry?.description === 'string' ? entry.description : '' })
+  }
+  return next
+}
+
+/** Validate one raw configuration and fill its defaults; throws on a wrong shape. */
+function sanitize (raw) {
+  const source = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const value = {}
+  for (const [key, fallback] of Object.entries(DEFAULTS)) {
+    value[key] = source[key] === undefined ? (Array.isArray(fallback) ? [...fallback] : fallback) : source[key]
+  }
+  for (const key of STRING_FIELDS) {
+    if (typeof value[key] !== 'string' || value[key].trim().length === 0) throw new Error(`\`${key}\` must be a non-empty string`)
+  }
+  if (typeof value.blockBuiltinDelegation !== 'boolean') throw new Error('`blockBuiltinDelegation` must be a boolean')
+  for (const key of NAME_LIST_FIELDS) {
+    if (!Array.isArray(value[key]) || value[key].some((name) => typeof name !== 'string')) {
+      throw new Error(`\`${key}\` must be an array of tool names`)
+    }
+  }
+  if (!Array.isArray(value.models)) throw new Error('`models` must be an array of { route, description }')
+  value.models = normalizeModels(value.models)
+  return value
+}
 
 const PERSONA_SECTION = 'deployment:persona-prefix'
 const PERSONA_FALLBACK_SECTION = 'subagent-forge:persona'
@@ -42,16 +71,6 @@ function dataDir () {
 /** Path of the user-edited configuration. */
 function configPath () {
   return join(dataDir(), 'config.json')
-}
-
-/** Drop fields this version no longer declares, then validate and fill defaults. */
-function sanitize (raw) {
-  const defaults = Config({})
-  const next = { ...defaults }
-  for (const key of Object.keys(defaults)) {
-    if (raw?.[key] !== undefined) next[key] = raw[key]
-  }
-  return Config(next)
 }
 
 /** Read the saved configuration, or undefined when none was saved yet. */
@@ -85,6 +104,61 @@ function writeSpec (childId, spec) {
   writeFileSync(join(dir, `${childId}.json`), JSON.stringify(spec), 'utf8')
 }
 
+/**
+ * Enumerate every route the live LLM runtime advertises.
+ * @param ctx - context carrying the `llm` service.
+ * @returns the advertised routes, or undefined when that service is unavailable.
+ */
+export async function discoverModels (ctx) {
+  const llm = ctx.get('llm')
+  if (llm === undefined) return undefined
+  const found = []
+  for (const provider of llm.listProviders()) {
+    let models
+    try {
+      models = await llm.listModels(provider.id)
+    } catch (error) {
+      ctx.logger?.warn(`subagent-forge: cannot list the models of provider "${provider.id}": ${error?.message ?? error}`)
+      continue
+    }
+    for (const model of Array.isArray(models) ? models : []) {
+      if (typeof model?.id !== 'string' || model.id.trim().length === 0) continue
+      found.push({
+        route: `${provider.id}/${model.id}`,
+        description: typeof model.description === 'string' && model.description.length > 0 ? model.description : model.name ?? '',
+      })
+    }
+  }
+  return normalizeModels(found)
+}
+
+/** How long the first start waits for providers to advertise models. */
+const SEED_INTERVAL_MS = 250
+const SEED_ATTEMPTS = 60
+
+/**
+ * Fill an empty allowlist from the live providers, retrying while the catalog is
+ * still empty. A saved configuration always wins, so a deliberately emptied list
+ * stays an inherit-only tool.
+ * @param ctx - owning context.
+ * @param attempt - retry counter.
+ */
+async function seedAllowlist (ctx, attempt = 0) {
+  const local = state
+  if (local === undefined || local.ctx !== ctx || local.config.models.length > 0) return
+  if (readSavedConfig() !== undefined) return
+  const models = await discoverModels(ctx)
+  if (models === undefined || models.length === 0) {
+    if (attempt >= SEED_ATTEMPTS) return
+    const timer = setTimeout(() => { void seedAllowlist(ctx, attempt + 1) }, SEED_INTERVAL_MS)
+    timer.unref?.()
+    return
+  }
+  if (state !== local || local.config.models.length > 0 || readSavedConfig() !== undefined) return
+  ctx.logger?.info(`subagent-forge: seeded the model allowlist with ${models.length} route(s) advertised by the live providers`)
+  reconfigure({ ...local.config, models })
+}
+
 /** Split an allowlist route into provider and model, keeping slashes in the model id. */
 function parseRoute (route) {
   const slash = route.indexOf('/')
@@ -96,7 +170,7 @@ function parseRoute (route) {
 
 /** Render the allowlist for the model-facing description. */
 function modelLines (config) {
-  if (config.models.length === 0) return ['Allowed models: none configured yet; only the current route can be used.']
+  if (config.models.length === 0) return ['Allowed models: none configured yet; omit `model` to inherit your own route.']
   return ['Allowed models:', ...config.models.map(entry =>
     `- ${entry.route}${entry.description?.length > 0 ? ` — ${entry.description}` : ''}`)]
 }
@@ -116,7 +190,9 @@ function toolDescription (config, inheritsContext) {
     'Start a subagent seeded with this conversation: it receives every completed turn so far, but not the current in-flight one, so build on that context instead of restating it.',
     'Its system prompt and tool set are inherited, so it takes no custom `system_prompt`; use it when the subtask needs this conversation’s context without spending this conversation’s context on the work.',
   ]
-  const lines = inheritsContext ? [...fork, ...common] : [...fresh, ...common]
+  const lines = inheritsContext
+    ? [...fork, ...modelLines(config), ...common]
+    : [...fresh, ...modelLines(config), ...common]
   return lines.join('\n')
 }
 
@@ -166,7 +242,7 @@ async function resolveSelection (ctx, config, args, signal) {
 
   const wanted = String(args.model)
   if (config.models.length === 0) {
-    throw new Error('no models are allowed yet: configure the model allowlist before choosing a route')
+    throw new Error('no models are allowed yet: add routes in Settings → Built-in plugins → Subagent forge, or omit `model` to inherit the parent route')
   }
   const entry = config.models.find(candidate => candidate.route === wanted)
   if (entry === undefined) {
@@ -185,12 +261,9 @@ async function resolveSelection (ctx, config, args, signal) {
   return { route, effort }
 }
 
-/** Build one delegation tool definition. */
-function buildTool (ctx, config, options) {
-  const toolName = options.toolName
-  const inheritsContext = options.inheritsContext
-
-  const parameters = {
+/** Tool parameters in the registry-ready spec shape, keyed by name. */
+function parameterSpec (inheritsContext) {
+  const spec = {
     description: {
       type: 'string',
       required: true,
@@ -224,26 +297,50 @@ function buildTool (ctx, config, options) {
       description: 'Initial child working directory. Relative paths use your current directory; omitted inherits it.',
     },
   }
-
   if (!inheritsContext) {
-    parameters.system_prompt = {
+    spec.system_prompt = {
       type: 'string',
       description: 'Durable role and rules for this child only. It replaces the inherited persona for that session; the parent keeps its own.',
     }
   }
+  return spec
+}
 
-  return defineTool({
+/** Convert a spec object into a JSON Schema the tool registry accepts. */
+function toJsonSchema (spec) {
+  const properties = {}
+  const required = []
+  for (const [key, field] of Object.entries(spec)) {
+    const { required: isRequired, ...schema } = field
+    properties[key] = schema
+    if (isRequired === true) required.push(key)
+  }
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties,
+    ...required.length === 0 ? {} : { required },
+  }
+}
+
+/** Build one delegation tool definition ready for `tools.register`. */
+function buildTool (ctx, config, options) {
+  const toolName = options.toolName
+  const inheritsContext = options.inheritsContext
+
+  return {
     name: toolName,
     description: toolDescription(config, inheritsContext),
-    parameters,
+    parameters: toJsonSchema(parameterSpec(inheritsContext)),
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          kind: { type: 'string', required: true, const: 'activation' },
-          subagentId: { type: 'string', required: true },
+          kind: { type: 'string', const: 'activation' },
+          subagentId: { type: 'string' },
         },
+        required: ['kind', 'subagentId'],
       },
       render: (_args, value) => [{ type: 'text', text: `started subagent ${value.subagentId}` }],
     },
@@ -289,7 +386,7 @@ function buildTool (ctx, config, options) {
 
       return { kind: 'activation', subagentId: activation.childId }
     },
-  })
+  }
 }
 
 /** Register both tools and the built-in block for one configuration. */
@@ -302,6 +399,18 @@ function mount (ctx, config) {
     : ctx.tools.guard(execution => blockedSet.has(execution.name)
       ? `Blocked by ${name}: start subagents with \`${config.toolName}\` or \`${config.forkToolName}\` instead.`
       : undefined)
+
+  // Runs per execution and reads the durable spec, so a child started without
+  // the grant cannot delegate even when the tool is still listed.
+  const delegationNames = new Set(delegationTools(config))
+  const disposeGrantGuard = ctx.tools.guard((execution) => {
+    if (!delegationNames.has(execution.name)) return undefined
+    const agent = execution.agent
+    if (agent === undefined) return undefined
+    const spec = readSpec(agent.id)
+    if (spec === undefined || spec.canDelegate === true) return undefined
+    return `Blocked by ${name}: this subagent was started without \`can_delegate\`, so it cannot delegate further.`
+  })
 
   const disposers = [
     ctx.tools.register(buildTool(ctx, config, {
@@ -319,6 +428,7 @@ function mount (ctx, config) {
   return {
     dispose () {
       for (const dispose of disposers) dispose()
+      disposeGrantGuard()
       disposeGuard()
     },
   }
@@ -351,14 +461,109 @@ export function reconfigure (value) {
   return config
 }
 
+const PREFIX = '/subagent-forge'
+const MAX_BYTES = 256 * 1024
+
+/** Send one JSON document. */
+function send (res, status, body) {
+  const text = JSON.stringify(body)
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'content-length': Buffer.byteLength(text),
+  })
+  res.end(text)
+}
+
+/** Accept only a loopback Host header: this route belongs to the local page. */
+function loopback (req) {
+  const host = String(req.headers.host ?? '')
+  const hostname = host.replace(/:\d+$/u, '').replace(/^\[|\]$/gu, '')
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname.startsWith('127.')
+}
+
+/** Read one JSON request body with a hard size cap. */
+function readBody (req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > MAX_BYTES) {
+        reject(new Error('request body is too large'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      } catch (error) {
+        reject(error)
+      }
+    })
+    req.on('error', reject)
+  })
+}
+
 /**
- * Install the configurable delegation tools and make the built-in delegation
- * tools unreachable.
+ * Expose the plugin configuration to its own settings page when the composition
+ * has a web server.
+ * @param ctx - owning context.
+ */
+function registerSettingsBridge (ctx) {
+  ctx.inject(['webServer'], (scoped) => {
+    const target = scoped ?? ctx
+    const webServer = target.get('webServer') ?? target.webServer
+    if (webServer === undefined || typeof webServer.register !== 'function') return
+    target.effect(() => webServer.register({
+      kind: 'prefix',
+      path: PREFIX,
+      async handler (req, res) {
+        if (!loopback(req)) return send(res, 403, { error: 'not allowed' })
+
+        const path = new URL(req.url ?? '/', 'http://localhost').pathname.slice(PREFIX.length) || '/'
+
+        if (path === '/config' && req.method === 'GET') {
+          const value = currentConfig()
+          if (value === undefined) return send(res, 503, { error: 'the plugin is not active' })
+          return send(res, 200, { value })
+        }
+
+        if (path === '/catalog' && req.method === 'GET') {
+          const models = await discoverModels(target)
+          if (models === undefined) return send(res, 503, { error: 'the `llm` service is unavailable' })
+          return send(res, 200, { value: { models } })
+        }
+
+        if (path === '/config' && req.method === 'POST') {
+          try {
+            const body = await readBody(req)
+            if (body?.value === null || typeof body?.value !== 'object' || Array.isArray(body.value)) {
+              return send(res, 400, { error: 'the request body must be {"value": {…}}' })
+            }
+            return send(res, 200, { value: reconfigure(body.value) })
+          } catch (error) {
+            return send(res, 400, { error: `invalid configuration: ${error.message}` })
+          }
+        }
+
+        return send(res, 404, { error: 'not found' })
+      },
+    }))
+  })
+}
+
+/**
+ * Install the configurable delegation tools, make the built-in delegation tools
+ * unreachable, and serve the settings page.
  * @param ctx - owning context.
  * @param baseConfig - configuration declared by the profile patch.
  */
 export function apply (ctx, baseConfig) {
-  const config = readSavedConfig() ?? sanitize(baseConfig)
+  const saved = readSavedConfig()
+  const config = saved ?? sanitize(baseConfig)
   const local = { ctx, config, mounted: mount(ctx, config) }
   state = local
 
@@ -377,4 +582,8 @@ export function apply (ctx, baseConfig) {
       ctx.logger.warn(`subagent-forge: child initialization failed for ${agent.id}: ${error}`)
     }
   })
+
+  registerSettingsBridge(ctx)
+
+  if (saved === undefined && config.models.length === 0) void seedAllowlist(ctx)
 }

@@ -7,6 +7,8 @@ Replaces the built-in delegation tools with one configurable tool: the calling
 agent writes the child's system prompt, optionally its first user message, picks
 its model from a configurable allowlist (with descriptions the agent reads), sets
 a reasoning effort, and decides whether that child may start subagents of its own.
+The allowlist is seeded from the providers the profile configures, so it always
+matches the installation.
 
 ```bash
 # from a GitHub repository
@@ -17,7 +19,7 @@ dsh plugin --profile <profile> add /absolute/path/to/dsh-subagent-forge
 ```
 
 Requires DeepSeek Harness `>=0.2.1` (`engines.dsh`). No build step: the package
-ships plain ESM.
+ships plain ESM and declares no runtime dependencies or peer dependencies.
 
 ## Tools
 
@@ -35,17 +37,20 @@ Shared parameters:
 | `description` | short label, required |
 | `prompt` | first user message / task; omitted uses `emptyPrompt` |
 | `system_prompt` | only `spawn_agent`: durable role and rules for this child |
-| `model` | `provider/model`, exactly one allowlist route |
+| `model` | `provider/model`, exactly one route from the allowlist; the allowlist and its descriptions are rendered into the tool description, so the agent reads them before choosing. Omit to inherit the parent route |
 | `reasoning_effort` | reasoning effort advertised for that model (`effort` is an alias) |
 | `can_delegate` | **required**: whether the child may start its own subagents |
 | `cwd` | initial child working directory |
 
 ## Recursion
 
-There is no depth counter. A child sees the delegation tools only when its
-direct parent passed `can_delegate: true`; a child that receives the grant
-decides the same question for its own children. Children without the grant also
-lose `workflow`, because it can start agents indirectly.
+There is no depth counter. Delegation is gated per child by the `can_delegate`
+flag the parent states on every call; a child that receives the grant decides
+the same question for its own children. Children without the grant also lose
+`workflow`, because it can start agents indirectly.
+
+The plugin hides the delegation tools from a child without the grant where the
+runtime allows it, and refuses the call otherwise.
 
 ## Built-in delegation is blocked twice
 
@@ -63,16 +68,27 @@ The page lives in **Settings → Built-in plugins → Subagent forge** (a tab in
 Plugins settings section). It edits the model allowlist: one row per route with
 the `description` the agent reads when it chooses.
 
+On the first start the allowlist is seeded from the providers the profile
+configures, so a fresh install can choose models immediately and never offers a
+route the installation does not have. That snapshot is persisted: edit it on the
+page, press **Add models from my providers** to re-read the live catalog, or
+delete `$DSH_HOME/subagent-forge/config.json` to seed again on the next start. A
+blank row is dropped and a repeated route keeps its first row.
+
 Edits are validated, applied to the live tool at once, and stored in
 `$DSH_HOME/subagent-forge/config.json`, which takes precedence over the bundle
-patch on the next start. The write path is:
+patch on the next start. A saved file always wins — including an empty list, which
+is honoured as-is: the tool then only inherits the parent route. The write path is:
 
 ```
 page → POST /subagent-forge/config (loopback only)
-     → reconfigure(value): Config(value) → file → re-register the tool
+     → reconfigure(value): sanitize → file → re-register the tool
+page → GET /subagent-forge/catalog
+     → discoverModels(ctx): llm.listProviders → llm.listModels
 ```
 
-The route is registered by the second bundle row (`subagent-forge-bridge`).
+The route is registered by the plugin itself through the optional `webServer`
+service, so a headless profile keeps the tools and loses the page.
 
 ## Durability
 
@@ -82,11 +98,24 @@ child resumes (the plugin re-registers the persona section and the restrictions
 on `agent/created`, which fires for resumes too). Losing that directory does not
 break a child; it only loses the custom persona on later resumes.
 
+## Repository checks
+
+```bash
+npm run check   # encoding guard for shipped text files
+npm test        # behaviour tests for the plugin
+```
+
+Both scripts use Node built-ins only; neither `test/` nor `scripts/` is part of
+the published package.
+
 ## Known limits
 
 - The child's composition (tool set) is inherited from the parent; only the
   persona and the delegation grant are overridden per child.
 - `workflow` is not blocked for agents that hold the grant.
+- The seeded allowlist is a snapshot of the providers registered at that moment;
+  after changing the provider configuration, run the discovery again or delete
+  `config.json`.
 - Changing code of the installed package needs an application restart; the
   settings page itself needs one page refresh after installation.
 - After installation the browser must be reloaded once to load the client half.

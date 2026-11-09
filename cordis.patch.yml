@@ -1,4 +1,4 @@
-﻿- insert:
+- insert:
     - id: subagent-forge
       name: 'dsh-subagent-forge'
       config:
@@ -13,22 +13,3 @@
         extraDelegationTools:
           - workflow
         emptyPrompt: Begin the task described in your system prompt.
-        models:
-          - route: polza/deepseek/deepseek-v4.1-flash-1017
-            description: Fast general-purpose default; good for mechanical edits and short tasks.
-          - route: polza/deepseek/deepseek-v4-flash-vision-exp
-            description: Accepts image input; use when the child must read screenshots or pictures.
-          - route: polza/minimax/minimax-m3.1-flash
-            description: Fast alternative for short, well-specified subtasks.
-          - route: polza/moonshotai/kimi-k3.1-pro
-            description: Strong long-context reasoning; use for deep analysis over large inputs.
-          - route: polza/qwen/qwen3.8-max
-            description: Strong reasoning; use for the hardest subtasks.
-          - route: polza/z-ai/glm-5.3
-            description: General-purpose alternative for cross-checks and second opinions.
-          - route: polza/xiaomi/mimo-v2.6-pro
-            description: General-purpose alternative with a large context window.
-          - route: polza/stepfun/step-5-preview
-            description: Preview model with a small output cap; short answers only.
-    - id: subagent-forge-bridge
-      name: 'dsh-subagent-forge/bridge'

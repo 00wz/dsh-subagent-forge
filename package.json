@@ -1,9 +1,13 @@
-﻿{
+{
   "name": "dsh-subagent-forge",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "type": "module",
   "description": "Configurable subagents for DeepSeek Harness: a per-child system prompt, a model allowlist with descriptions, reasoning effort, and an explicit per-launch delegation grant.",
   "license": "MIT",
+  "scripts": {
+    "check": "node scripts/check-encoding.mjs",
+    "test": "node test/verify.mjs"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/00wz/dsh-subagent-forge.git"
@@ -23,13 +27,8 @@
   "engines": {
     "dsh": ">=0.2.1"
   },
-  "peerDependencies": {
-    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.1",
-    "@deepseek-ai/schemastery": ">=3.0.0"
-  },
   "exports": {
     ".": "./index.js",
-    "./bridge": "./bridge.js",
     "./client": "./client.js",
     "./icon": "./icon.svg",
     "./package.json": "./package.json",
@@ -37,7 +36,6 @@
   },
   "files": [
     "index.js",
-    "bridge.js",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",

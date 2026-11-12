@@ -125,7 +125,7 @@ export async function discoverModels (ctx) {
       if (typeof model?.id !== 'string' || model.id.trim().length === 0) continue
       found.push({
         route: `${provider.id}/${model.id}`,
-        description: typeof model.description === 'string' && model.description.length > 0 ? model.description : model.name ?? '',
+        description: typeof model.description === 'string' ? model.description : '',
       })
     }
   }
@@ -170,20 +170,22 @@ function parseRoute (route) {
 
 /** Render the allowlist for the model-facing description. */
 function modelLines (config) {
-  if (config.models.length === 0) return ['Allowed models: none configured yet; omit `model` to inherit your own route.']
-  return ['Allowed models:', ...config.models.map(entry =>
-    `- ${entry.route}${entry.description?.length > 0 ? ` — ${entry.description}` : ''}`)]
+  if (config.models.length === 0) return ['Allowed models: none configured yet; omit `model_id` to inherit your own route.']
+  return [
+    'Allowed models — pass one of these `model_id` values verbatim as `model_id` (the value, not its description):',
+    ...config.models.map(entry => `- model_id: ${entry.route}${entry.description?.length > 0 ? `\n  description: ${entry.description}` : ''}`),
+  ]
 }
 
 /** Build the model-facing description of one delegation tool. */
 function toolDescription (config, inheritsContext) {
   const common = [
     'The child runs in a separate session; you receive its result, not its intermediate steps.',
-    'A child can start its own subagents only when you pass `can_delegate: true`. There is no depth limit: a child that receives the grant decides the same question for its own children. Grant it only when the task genuinely needs further decomposition.',
+    'A child can start its own subagents only when you pass `can_delegate: true`; a child that receives the grant decides the same question for its children. Pass `true` when the child’s task may need decomposition, and `false` only for a terminal, single-shot task that must be done alone.',
     'This tool replaces the built-in delegation tools; they are disabled.',
   ]
   const fresh = [
-    'Start a subagent you configure completely: you write its system prompt, optionally its first user message, pick its model and reasoning effort from the allowed list, and decide whether it may start subagents of its own.',
+    'Start a subagent you configure completely: you write its system prompt, optionally its first user message, pick its `model_id` and reasoning effort from the allowed list, and decide whether it may start subagents of its own.',
     'The child starts fresh and does not see this conversation. Put durable role and rules into `system_prompt`, and the concrete task into `prompt`.',
   ]
   const fork = [
@@ -234,19 +236,20 @@ function hideDelegation (config, agent) {
 
 /** Resolve and preflight one model selection against the allowlist and the live adapter. */
 async function resolveSelection (ctx, config, args, signal) {
+  const requested = args.model_id ?? args.model
   const effort = args.reasoning_effort ?? args.effort
-  if (effort !== undefined && args.model === undefined) {
-    throw new Error('`reasoning_effort` requires `model`; an inherited route keeps the parent effort')
+  if (effort !== undefined && requested === undefined) {
+    throw new Error('`reasoning_effort` requires `model_id`; an inherited route keeps the parent effort')
   }
-  if (args.model === undefined) return undefined
+  if (requested === undefined) return undefined
 
-  const wanted = String(args.model)
+  const wanted = String(requested)
   if (config.models.length === 0) {
-    throw new Error('no models are allowed yet: add routes in Settings → Built-in plugins → Subagent forge, or omit `model` to inherit the parent route')
+    throw new Error('no models are allowed yet: add routes in Settings → Built-in plugins → Subagent forge, or omit `model_id` to inherit the parent route')
   }
   const entry = config.models.find(candidate => candidate.route === wanted)
   if (entry === undefined) {
-    throw new Error(`model route "${wanted}" is not allowed; allowed routes: ${config.models.map(candidate => candidate.route).join(', ')}`)
+    throw new Error(`model_id "${wanted}" is not allowed; allowed routes: ${config.models.map(candidate => candidate.route).join(', ')}`)
   }
   const route = parseRoute(entry.route)
 
@@ -275,13 +278,17 @@ function parameterSpec (inheritsContext) {
         ? 'The task for the child. It already sees the completed turns, so state only what is new.'
         : 'The first user message for the child. Omit to start it from the configured bootstrap text.',
     },
+    model_id: {
+      type: 'string',
+      description: 'One of the `model_id` values listed under "Allowed models" — the exact string, not its description. Omit to inherit the parent route.',
+    },
     model: {
       type: 'string',
-      description: 'Exactly one route from the allowed list, written as "provider/model". Omit to inherit the parent route.',
+      description: 'Deprecated alias of `model_id`; prefer `model_id`.',
     },
     reasoning_effort: {
       type: 'string',
-      description: 'Reasoning effort id advertised for the chosen model. Requires `model`.',
+      description: 'Reasoning effort id advertised for the chosen model. Requires `model_id`.',
     },
     effort: {
       type: 'string',
@@ -290,7 +297,7 @@ function parameterSpec (inheritsContext) {
     can_delegate: {
       type: 'boolean',
       required: true,
-      description: 'Whether this child may start its own subagents. State it on every call: a child that receives the grant decides the same question for its children.',
+      description: 'Whether this child may start its own subagents. Pass `true` when the task may need decomposition — research, multi-file work, anything you would split yourself; pass `false` only for a terminal, single-shot task that must be done alone. The flag bounds recursion; it is not a default to opt out of delegation.',
     },
     cwd: {
       type: 'string',
@@ -359,7 +366,7 @@ function buildTool (ctx, config, options) {
       writeSpec(childId, {
         systemPrompt: inheritsContext || typeof args.system_prompt !== 'string' ? '' : args.system_prompt,
         canDelegate: args.can_delegate === true,
-        model: args.model ?? null,
+        model: args.model_id ?? args.model ?? null,
         tool: toolName,
         createdAt: Date.now(),
       })

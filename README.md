@@ -37,10 +37,13 @@ Shared parameters:
 | `description` | short label, required |
 | `prompt` | first user message / task; omitted uses `emptyPrompt` |
 | `system_prompt` | only `spawn_agent`: durable role and rules for this child |
-| `model` | `provider/model`, exactly one route from the allowlist; the allowlist and its descriptions are rendered into the tool description, so the agent reads them before choosing. Omit to inherit the parent route |
+| `model_id` | one of the `model_id` values listed in the tool description (`provider/model`); pass the value verbatim, not its description. Omit to inherit the parent route |
 | `reasoning_effort` | reasoning effort advertised for that model (`effort` is an alias) |
-| `can_delegate` | **required**: whether the child may start its own subagents |
+| `can_delegate` | **required**: whether the child may start its own subagents. Pass `true` when the task may need decomposition; pass `false` only for a terminal, single-shot task |
 | `cwd` | initial child working directory |
+
+`model` remains accepted as a deprecated alias of `model_id`, for prompts and
+scripts written before the rename.
 
 ## Recursion
 
@@ -48,6 +51,10 @@ There is no depth counter. Delegation is gated per child by the `can_delegate`
 flag the parent states on every call; a child that receives the grant decides
 the same question for its own children. Children without the grant also lose
 `workflow`, because it can start agents indirectly.
+
+The flag bounds recursion; it is not a default to opt out of delegation. A task
+that spans files, needs research, or would be split by the parent itself should
+give the child the grant, and that child decides in turn whether to delegate.
 
 The plugin hides the delegation tools from a child without the grant where the
 runtime allows it, and refuses the call otherwise.
@@ -70,10 +77,13 @@ the `description` the agent reads when it chooses.
 
 On the first start the allowlist is seeded from the providers the profile
 configures, so a fresh install can choose models immediately and never offers a
-route the installation does not have. That snapshot is persisted: edit it on the
-page, press **Add models from my providers** to re-read the live catalog, or
-delete `$DSH_HOME/subagent-forge/config.json` to seed again on the next start. A
-blank row is dropped and a repeated route keeps its first row.
+route the installation does not have. A model whose catalog entry has no
+description is seeded with an empty one: the plugin does not substitute the
+model name, so the settings page never shows an invented description. That
+snapshot is persisted: edit it on the page, press **Add models from my
+providers** to re-read the live catalog, or delete
+`$DSH_HOME/subagent-forge/config.json` to seed again on the next start. A blank
+row is dropped and a repeated route keeps its first row.
 
 Edits are validated, applied to the live tool at once, and stored in
 `$DSH_HOME/subagent-forge/config.json`, which takes precedence over the bundle

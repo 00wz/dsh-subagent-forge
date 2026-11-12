@@ -22,7 +22,7 @@ const forge = await import(pathToFileURL(join(ROOT, 'index.js')).href)
 
 const EXPECTED = [
   { route: 'polza/deepseek/x', description: 'fast' },
-  { route: 'polza/z-ai/glm', description: 'GLM 5' },
+  { route: 'polza/z-ai/glm', description: '' },
   { route: 'local/llama', description: '' },
 ]
 
@@ -38,6 +38,7 @@ const fakeLlm = {
     if (id === 'local') return [{ id: 'llama' }]
     throw new Error(`unknown provider ${id}`)
   },
+  resolveCallConfig: async () => ({}),
 }
 
 const tick = (ms = 100) => new Promise((done) => setTimeout(done, ms))
@@ -62,6 +63,7 @@ function makeCtx ({ llm, withWebServer = true } = {}) {
   const restrictions = []
   const routes = []
   const logs = []
+  let activationCount = 0
   const ctx = {
     registered,
     guards,
@@ -82,7 +84,7 @@ function makeCtx ({ llm, withWebServer = true } = {}) {
       },
     },
     agents: { list: () => [] },
-    subagents: { startActivation: async () => ({ childId: 'child-1' }) },
+    subagents: { startActivation: async (spec) => ({ childId: spec?.childId ?? `child-${++activationCount}` }) },
     systemPrompt: { getSectionOrder: () => 1, section: () => {} },
     logger: {
       info: (message) => logs.push(`info: ${message}`),
@@ -165,8 +167,10 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
   assert.deepEqual(spawn.parameters.required, ['description', 'can_delegate'], 'required parameters are a JSON Schema list')
   assert.ok(spawn.parameters.properties.system_prompt, 'spawn_agent takes a system prompt')
   assert.equal(fork.parameters.properties.system_prompt, undefined, 'fork_agent takes no system prompt')
-  assert.match(spawn.description, /Allowed models:/u, 'the allowlist reaches the model')
-  assert.match(spawn.description, /polza\/deepseek\/x — fast/u, 'the route description reaches the model')
+  assert.match(spawn.description, /Allowed models/u, 'the allowlist reaches the model')
+  assert.match(spawn.description, /- model_id: polza\/deepseek\/x\n  description: fast/u, 'the route and its description reach the model')
+  assert.ok(spawn.parameters.properties.model_id, 'the schema names the catalog id explicitly')
+  assert.match(spawn.parameters.properties.model.description, /Deprecated alias/u, '`model` stays as a deprecated alias')
   assert.doesNotMatch(spawn.description, /none configured yet/u)
   assert.match(fork.description, /polza\/z-ai\/glm/u)
   assert.equal(ctx.guards.length, 2, 'the built-in block and the grant guard are installed')
@@ -200,7 +204,7 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
   await tick()
 
   assert.equal(readFileSync(file, 'utf8'), text, 'the saved file is untouched')
-  assert.match(ctx.registered.get('spawn_agent').description, /polza\/only — saved/u)
+  assert.match(ctx.registered.get('spawn_agent').description, /- model_id: polza\/only\n  description: saved/u)
   assert.doesNotMatch(ctx.registered.get('spawn_agent').description, /polza\/deepseek\/x/u)
   pass('a saved configuration is not overwritten')
 }
@@ -217,7 +221,7 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
   assert.match(spawn.description, /none configured yet/u)
   await assert.rejects(
     () => spawn.execute(
-      { description: 'x', model: 'polza/deepseek/x', can_delegate: true },
+      { description: 'x', model_id: 'polza/deepseek/x', can_delegate: true },
       { agent: {}, signal: { throwIfAborted () {} } },
     ),
     /no models are allowed yet/u,
@@ -259,7 +263,7 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
 
   const readBack = await call(route, { url: '/subagent-forge/config' })
   assert.deepEqual(readBack.body.value.models, [{ route: 'polza/deepseek/x', description: 'edited' }], 'the normalized value is persisted')
-  assert.match(ctx.registered.get('spawn_agent').description, /polza\/deepseek\/x — edited/u, 'the live tool follows the saved value')
+  assert.match(ctx.registered.get('spawn_agent').description, /- model_id: polza\/deepseek\/x\n  description: edited/u, 'the live tool follows the saved value')
   pass('one row serves /config and /catalog')
 }
 
@@ -324,7 +328,7 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
   assert.equal(existsSync(join(dir, 'subagent-forge', 'config.json')), false, 'nothing is written while the catalog is empty')
   await tick(900)
   const saved = JSON.parse(readFileSync(join(dir, 'subagent-forge', 'config.json'), 'utf8'))
-  assert.deepEqual(saved.models, [{ route: 'polza/late/model', description: 'Late model' }], 'the retry seeds once providers appear')
+  assert.deepEqual(saved.models, [{ route: 'polza/late/model', description: '' }], 'the retry seeds once providers appear, without inventing a description')
   pass('first start retries until providers advertise models')
 }
 
@@ -337,6 +341,32 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
   const moduleId = client.slice(start).match(/\bid:\s*'([^']+)'/u)?.[1]
   assert.equal(moduleId, pkg.name, 'the Host lists the bundle by package name, so the registration id must match it')
   pass('the client bundle registers under the package name')
+}
+
+// --- G4: `model_id` selects a route; `model` still works as an alias ------
+{
+  const dir = home('models')
+  const ctx = makeCtx({ llm: fakeLlm })
+  forge.apply(ctx, baseConfig())
+  await tick()
+  const spawn = ctx.registered.get('spawn_agent')
+  assert.match(spawn.description, /pass one of these `model_id` values verbatim/u, 'the description tells the model which value to pass')
+  const exec = { agent: {}, signal: { throwIfAborted () {} } }
+
+  const viaId = await spawn.execute(
+    { description: 'by id', prompt: 'p', can_delegate: false, model_id: 'polza/deepseek/x' },
+    exec,
+  )
+  const idSpec = JSON.parse(readFileSync(join(dir, 'subagent-forge', 'children', `${viaId.subagentId}.json`), 'utf8'))
+  assert.equal(idSpec.model, 'polza/deepseek/x', '`model_id` reaches the child spec')
+
+  const viaAlias = await spawn.execute(
+    { description: 'by alias', prompt: 'p', can_delegate: false, model: 'polza/z-ai/glm' },
+    exec,
+  )
+  const aliasSpec = JSON.parse(readFileSync(join(dir, 'subagent-forge', 'children', `${viaAlias.subagentId}.json`), 'utf8'))
+  assert.equal(aliasSpec.model, 'polza/z-ai/glm', 'the legacy `model` alias still selects a route')
+  pass('model_id selects the route and model remains a working alias')
 }
 
 console.log(`\n${passed} checks passed`)

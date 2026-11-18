@@ -61,13 +61,23 @@ runtime allows it, and refuses the call otherwise.
 
 ## Built-in delegation is blocked twice
 
-1. `tools.guard` denies execution of `subagent` / `subagent_fork` in every
-   scope, including steps whose tool list was resolved before this plugin
-   loaded.
+The plugin replaces the whole tool surface of `@deepseek-ai/dsh-tool-subagent`:
+`subagent`, `subagent_fork` and `list_subagent_models` (`REPLACED_TOOLS` in
+`index.js`). One list, one mechanism:
+
+1. `tools.guard` denies execution of those names in every scope, including
+   steps whose tool list was resolved before this plugin loaded.
 2. `tools.restrict` hides them from each agent's tool list, so the model does
    not see a tool it cannot use.
 
-Both lists are configuration (`blockedTools`, `blockBuiltinDelegation`).
+The route-discovery tool is part of that surface: it reports the built-in
+tool's routes, which are not this allowlist, so the model would get a second,
+disagreeing answer right after reading the tool description. The allowed routes
+live in the `spawn_agent` / `fork_agent` descriptions.
+
+`blockedTools` adds extra names for a deployment that has another delegator to
+replace; the replaced surface itself is not configurable. The single switch is
+`blockBuiltinDelegation`, which turns the guard and the restriction off.
 
 ## Settings
 

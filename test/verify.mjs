@@ -174,7 +174,27 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
   assert.doesNotMatch(spawn.description, /none configured yet/u)
   assert.match(fork.description, /polza\/z-ai\/glm/u)
   assert.equal(ctx.guards.length, 2, 'the built-in block and the grant guard are installed')
+  const block = ctx.guards[0]
+  assert.match(block({ name: 'list_subagent_models' }), /is not available in this deployment/u, 'the built-in discovery tool is blocked')
+  assert.match(block({ name: 'subagent_fork' }), /is not available in this deployment/u, 'the built-in fork tool is blocked')
+  assert.equal(block({ name: 'read' }), undefined, 'ordinary tools pass the block guard')
   pass('first start seeds the allowlist from the live providers')
+}
+
+// --- B1b: one switch covers the whole replaced surface ---------------------
+{
+  home('discovery')
+  const ctx = makeCtx({ llm: fakeLlm })
+  forge.apply(ctx, { models: [], blockBuiltinDelegation: false })
+  await tick()
+  assert.equal(ctx.guards.length, 1, 'turning the block off leaves only the grant guard')
+
+  const extra = makeCtx({ llm: fakeLlm })
+  home('discovery-extra')
+  forge.apply(extra, { models: [], blockedTools: ['some_other_delegator'] })
+  await tick()
+  assert.match(extra.guards[0]({ name: 'some_other_delegator' }), /is not available in this deployment/u, 'extra names use the same guard')
+  pass('the replaced surface is one switch plus optional extra names')
 }
 
 // --- B2: the seeded file survives a restart and is not overwritten ----------

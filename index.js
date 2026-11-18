@@ -16,11 +16,14 @@ const DEFAULTS = {
   subagentProvider: 'spawn',
   forkProvider: 'fork',
   blockBuiltinDelegation: true,
-  blockedTools: ['subagent', 'subagent_fork'],
+  blockedTools: [],
   models: [],
   extraDelegationTools: ['workflow'],
   emptyPrompt: 'Begin the task described in your system prompt.',
 }
+
+/** The whole tool surface of `@deepseek-ai/dsh-tool-subagent`, replaced by this plugin. */
+const REPLACED_TOOLS = ['subagent', 'subagent_fork', 'list_subagent_models']
 
 const STRING_FIELDS = ['toolName', 'forkToolName', 'subagentProvider', 'forkProvider', 'emptyPrompt']
 const NAME_LIST_FIELDS = ['blockedTools', 'extraDelegationTools']
@@ -227,9 +230,16 @@ function delegationTools (config) {
   return [config.toolName, config.forkToolName, ...config.extraDelegationTools]
 }
 
+/** Built-in tools this plugin takes over, plus any deployment-specific extras. */
+function effectiveBlockedTools (config) {
+  if (!config.blockBuiltinDelegation) return []
+  return [...new Set([...REPLACED_TOOLS, ...config.blockedTools])]
+}
+
 /** Hide built-in delegation and, when the child has no grant, every delegation tool. */
 function hideDelegation (config, agent) {
-  if (config.blockBuiltinDelegation) denyInScope(agent, config.blockedTools)
+  const blocked = effectiveBlockedTools(config)
+  if (blocked.length > 0) denyInScope(agent, blocked)
   const spec = readSpec(agent.id)
   if (spec !== undefined && spec.canDelegate !== true) denyInScope(agent, delegationTools(config))
 }
@@ -398,13 +408,13 @@ function buildTool (ctx, config, options) {
 
 /** Register both tools and the built-in block for one configuration. */
 function mount (ctx, config) {
-  const blocked = config.blockBuiltinDelegation ? [...config.blockedTools] : []
+  const blocked = effectiveBlockedTools(config)
   const blockedSet = new Set(blocked)
 
   const disposeGuard = blocked.length === 0
     ? () => {}
     : ctx.tools.guard(execution => blockedSet.has(execution.name)
-      ? `Blocked by ${name}: start subagents with \`${config.toolName}\` or \`${config.forkToolName}\` instead.`
+      ? `Blocked by ${name}: ${execution.name} is not available in this deployment; delegate with \`${config.toolName}\` or \`${config.forkToolName}\`, whose descriptions list the allowed routes.`
       : undefined)
 
   // Runs per execution and reads the durable spec, so a child started without

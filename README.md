@@ -88,9 +88,12 @@ the `description` the agent reads when it chooses.
 On the first start the allowlist is seeded from the providers the profile
 configures, so a fresh install can choose models immediately and never offers a
 route the installation does not have. A model whose catalog entry has no
-description is seeded with an empty one: the plugin does not substitute the
-model name, so the settings page never shows an invented description. That
-snapshot is persisted: edit it on the page, press **Add models from my
+description is seeded with a one-line summary of what the catalog proves:
+modalities, context window and output limit, for example
+`text+image · 1M context · 384k output`. A model that declares no input is
+treated as text-only, never as image-capable. The model name is not used, so a
+route whose provider states nothing gets `text only` rather than a copy of its
+id. That snapshot is persisted: edit it on the page, press **Add models from my
 providers** to re-read the live catalog, or delete
 `$DSH_HOME/subagent-forge/config.json` to seed again on the next start. A blank
 row is dropped and a repeated route keeps its first row.

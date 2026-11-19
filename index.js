@@ -28,6 +28,27 @@ const REPLACED_TOOLS = ['subagent', 'subagent_fork', 'list_subagent_models']
 const STRING_FIELDS = ['toolName', 'forkToolName', 'subagentProvider', 'forkProvider', 'emptyPrompt']
 const NAME_LIST_FIELDS = ['blockedTools', 'extraDelegationTools']
 
+/** Format a token count for a one-line model summary. */
+function formatTokens (value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined
+  if (value >= 1048576) return `${(value / 1048576).toFixed(1).replace(/\.0$/u, '')}M`
+  if (value >= 1024) return `${Math.round(value / 1024)}k`
+  return String(value)
+}
+
+/** One-line facts for a model the catalog does not describe. */
+function modelFacts (model, info) {
+  const modalities = Array.isArray(model?.inputModalities) && model.inputModalities.length > 0
+    ? model.inputModalities
+    : Array.isArray(info?.inputModalities) && info.inputModalities.length > 0 ? info.inputModalities : ['text']
+  const parts = [modalities.includes('image') ? 'text+image' : 'text only']
+  const context = formatTokens(info?.contextWindow ?? info?.context?.contextWindow ?? model?.contextWindow)
+  const output = formatTokens(info?.maxTokens ?? info?.defaultMaxTokens ?? model?.maxTokens)
+  if (context !== undefined) parts.push(`${context} context`)
+  if (output !== undefined) parts.push(`${output} output`)
+  return parts.join(' · ')
+}
+
 /** Keep only usable allowlist rows: a non-blank route, first occurrence wins. */
 function normalizeModels (models) {
   const seen = new Set()
@@ -126,9 +147,17 @@ export async function discoverModels (ctx) {
     }
     for (const model of Array.isArray(models) ? models : []) {
       if (typeof model?.id !== 'string' || model.id.trim().length === 0) continue
+      let info
+      try {
+        info = await llm.resolveModelInfo(provider.id, model.id)
+      } catch {
+        // Facts are a convenience: a model that cannot be resolved still seeds its route.
+        info = undefined
+      }
+      const declared = typeof model.description === 'string' ? model.description.trim() : ''
       found.push({
         route: `${provider.id}/${model.id}`,
-        description: typeof model.description === 'string' ? model.description : '',
+        description: declared.length > 0 ? declared : modelFacts(model, info),
       })
     }
   }

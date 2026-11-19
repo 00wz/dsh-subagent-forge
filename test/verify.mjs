@@ -22,8 +22,8 @@ const forge = await import(pathToFileURL(join(ROOT, 'index.js')).href)
 
 const EXPECTED = [
   { route: 'polza/deepseek/x', description: 'fast' },
-  { route: 'polza/z-ai/glm', description: '' },
-  { route: 'local/llama', description: '' },
+  { route: 'polza/z-ai/glm', description: 'text only · 256k context · 64k output' },
+  { route: 'local/llama', description: 'text only' },
 ]
 
 const fakeLlm = {
@@ -39,6 +39,10 @@ const fakeLlm = {
     throw new Error(`unknown provider ${id}`)
   },
   resolveCallConfig: async () => ({}),
+  resolveModelInfo: async (provider, model) => {
+    if (provider === 'polza' && model === 'z-ai/glm') return { contextWindow: 262144, maxTokens: 65536 }
+    throw new Error(`no model info for ${provider}/${model}`)
+  },
 }
 
 const tick = (ms = 100) => new Promise((done) => setTimeout(done, ms))
@@ -348,7 +352,7 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
   assert.equal(existsSync(join(dir, 'subagent-forge', 'config.json')), false, 'nothing is written while the catalog is empty')
   await tick(900)
   const saved = JSON.parse(readFileSync(join(dir, 'subagent-forge', 'config.json'), 'utf8'))
-  assert.deepEqual(saved.models, [{ route: 'polza/late/model', description: '' }], 'the retry seeds once providers appear, without inventing a description')
+  assert.deepEqual(saved.models, [{ route: 'polza/late/model', description: 'text only' }], 'the retry seeds once providers appear, with the facts it can prove')
   pass('first start retries until providers advertise models')
 }
 

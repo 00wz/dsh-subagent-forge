@@ -18,8 +18,17 @@ dsh plugin --profile <profile> add "github:<owner>/dsh-subagent-forge"
 dsh plugin --profile <profile> add /absolute/path/to/dsh-subagent-forge
 ```
 
-Requires DeepSeek Harness `>=0.2.1` (`engines.dsh`). No build step: the package
-ships plain ESM and declares no runtime dependencies or peer dependencies.
+Requires DeepSeek Harness `>=0.2.2-rc.2` (`engines.dsh`). Only the new
+`startActivation` API is supported: `parent`, `prompt`, `cwd` and `agentOptions`
+are top-level activation fields. DSH `0.2.2-rc.1` and earlier used the nested
+`request` contract and are not supported; upgrade DSH before installing.
+There is no legacy fallback or retry with another API shape.
+
+The API contract was checked for DSH `0.2.2-rc.2` through `0.2.2-rc.5`;
+live spawn/fork smoke tests were run on `0.2.2-rc.5`.
+
+No build step: the package ships plain ESM and declares no runtime dependencies
+or peer dependencies.
 
 ## Tools
 
@@ -101,7 +110,11 @@ row is dropped and a repeated route keeps its first row.
 Edits are validated, applied to the live tool at once, and stored in
 `$DSH_HOME/subagent-forge/config.json`, which takes precedence over the bundle
 patch on the next start. A saved file always wins — including an empty list, which
-is honoured as-is: the tool then only inherits the parent route. The write path is:
+is honoured as-is: the tool then only inherits the parent route. Updating or
+reinstalling the package does not reset that file. If it still lists a removed
+provider, the routes come from the saved snapshot, not hardcoded defaults.
+Discovery adds current models; remove obsolete rows in Settings and save when
+replacing the old snapshot. The write path is:
 
 ```
 page → POST /subagent-forge/config (loopback only)

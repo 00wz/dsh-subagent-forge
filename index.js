@@ -414,16 +414,14 @@ function buildTool (ctx, config, options) {
         provider: options.provider,
         childId,
         label: args.description,
-        request: {
-          parent,
-          prompt: [{ type: 'text', text: args.prompt ?? config.emptyPrompt }],
-          ...args.cwd === undefined ? {} : { cwd: args.cwd },
-          ...selection === undefined ? {} : {
-            agentOptions: {
-              provider: selection.route.provider,
-              model: selection.route.model,
-              ...selection.effort === undefined ? {} : { reasoningEffort: selection.effort },
-            },
+        parent,
+        prompt: [{ type: 'text', text: args.prompt ?? config.emptyPrompt }],
+        ...args.cwd === undefined ? {} : { cwd: args.cwd },
+        ...selection === undefined ? {} : {
+          agentOptions: {
+            provider: selection.route.provider,
+            model: selection.route.model,
+            ...selection.effort === undefined ? {} : { reasoningEffort: selection.effort },
           },
         },
         signal: exec.signal,

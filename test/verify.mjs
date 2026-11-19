@@ -67,8 +67,9 @@ function makeCtx ({ llm, withWebServer = true } = {}) {
   const restrictions = []
   const routes = []
   const logs = []
-  let activationCount = 0
+  const activations = []
   const ctx = {
+    activations,
     registered,
     guards,
     restrictions,
@@ -88,7 +89,17 @@ function makeCtx ({ llm, withWebServer = true } = {}) {
       },
     },
     agents: { list: () => [] },
-    subagents: { startActivation: async (spec) => ({ childId: spec?.childId ?? `child-${++activationCount}` }) },
+    subagents: {
+      async startActivation (spec) {
+        // DSH 0.2.2-rc.5 SubagentActivationSpec extends SubagentStartRequest:
+        // task fields are top-level, not wrapped in a legacy `request` object.
+        assert.ok(spec.parent, 'startActivation requires a top-level parent')
+        assert.ok(Array.isArray(spec.prompt), 'startActivation requires a top-level prompt')
+        assert.equal(spec.request, undefined, 'the legacy request wrapper is not part of the activation contract')
+        activations.push(spec)
+        return { childId: spec.childId }
+      },
+    },
     systemPrompt: { getSectionOrder: () => 1, section: () => {} },
     logger: {
       info: (message) => logs.push(`info: ${message}`),
@@ -151,6 +162,16 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
   assert.doesNotMatch(source, /from\s+['"]@deepseek-ai\//u, 'no @deepseek-ai import can be resolved from a profile install')
   assert.doesNotMatch(source, /\bdefineTool\s*\(\s*\{/u, 'tools are registered as plain registry-ready objects')
   pass('the plugin imports no Harness package')
+}
+
+// --- A2: installation metadata excludes the legacy activation API ---------
+{
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
+  assert.equal(pkg.engines.dsh, '>=0.2.2-rc.2', 'the minimum DSH release must use top-level activation fields')
+  assert.match(readme, /Requires DeepSeek Harness `>=0\.2\.2-rc\.2`/u, 'README and installation gate agree')
+  assert.match(readme, /There is no legacy fallback/u, 'the new-API-only policy is explicit')
+  pass('manifest and README require DSH >=0.2.2-rc.2 and exclude the legacy API')
 }
 
 // --- B: first start seeds the allowlist from the live providers -------------
@@ -391,6 +412,76 @@ async function call (route, { host = '127.0.0.1:52856', method = 'GET', url = '/
   const aliasSpec = JSON.parse(readFileSync(join(dir, 'subagent-forge', 'children', `${viaAlias.subagentId}.json`), 'utf8'))
   assert.equal(aliasSpec.model, 'polza/z-ai/glm', 'the legacy `model` alias still selects a route')
   pass('model_id selects the route and model remains a working alias')
+}
+
+// --- I: launch payload follows the real DSH activation contract ------------
+{
+  const dir = home('activation-contract')
+  const ctx = makeCtx({ llm: fakeLlm })
+  forge.apply(ctx, baseConfig())
+  await tick()
+  const parent = { id: 'parent-agent' }
+  const signal = new AbortController().signal
+  const exec = { agent: parent, signal }
+  const spawn = ctx.registered.get('spawn_agent')
+  const fork = ctx.registered.get('fork_agent')
+
+  const spawned = await spawn.execute({
+    description: 'explicit spawn', prompt: 'task', system_prompt: 'persona',
+    can_delegate: false, cwd: 'child-dir', model_id: 'polza/deepseek/x', reasoning_effort: 'high',
+  }, exec)
+  const spec = ctx.activations.at(-1)
+  assert.equal(spec.parent, parent, 'the calling Agent is passed directly')
+  assert.equal(spec.provider, 'spawn')
+  assert.equal(spec.childId, spawned.subagentId)
+  assert.equal(spec.label, 'explicit spawn')
+  assert.deepEqual(spec.prompt, [{ type: 'text', text: 'task' }])
+  assert.equal(spec.cwd, 'child-dir', 'cwd reaches the activation instead of being silently ignored')
+  assert.deepEqual(spec.agentOptions, { provider: 'polza', model: 'deepseek/x', reasoningEffort: 'high' })
+  assert.equal(spec.signal, signal)
+  assert.equal(spec.delivery, 'parent')
+  const saved = JSON.parse(readFileSync(join(dir, 'subagent-forge', 'children', `${spawned.subagentId}.json`), 'utf8'))
+  assert.equal(saved.systemPrompt, 'persona')
+  assert.equal(saved.canDelegate, false)
+
+  await fork.execute({ description: 'inherited fork', can_delegate: true }, exec)
+  const forked = ctx.activations.at(-1)
+  assert.equal(forked.provider, 'fork')
+  assert.equal(forked.parent, parent)
+  assert.deepEqual(forked.prompt, [{ type: 'text', text: 'Begin the task described in your system prompt.' }])
+  assert.equal(Object.hasOwn(forked, 'agentOptions'), false, 'omitted model preserves the parent route and effort')
+  assert.equal(Object.hasOwn(forked, 'cwd'), false, 'omitted cwd preserves directory inheritance')
+  const forkSpec = JSON.parse(readFileSync(join(dir, 'subagent-forge', 'children', `${forked.childId}.json`), 'utf8'))
+  assert.equal(forkSpec.systemPrompt, '', 'fork inherits its persona')
+  assert.equal(forkSpec.canDelegate, true)
+
+  await fork.execute({ description: 'explicit fork', can_delegate: false, model_id: 'polza/z-ai/glm' }, exec)
+  assert.deepEqual(ctx.activations.at(-1).agentOptions, { provider: 'polza', model: 'z-ai/glm' })
+  await spawn.execute({ description: 'inherited spawn', can_delegate: false }, exec)
+  assert.equal(Object.hasOwn(ctx.activations.at(-1), 'agentOptions'), false)
+  await assert.rejects(() => fork.execute({ description: 'bad fork', system_prompt: 'no', can_delegate: false }, exec), /does not accept/u)
+  await assert.rejects(() => spawn.execute({ description: 'no caller', can_delegate: false }, { signal }), /requires a calling agent/u)
+  const beforeAbort = ctx.activations.length
+  const aborted = new AbortController()
+  aborted.abort()
+  await assert.rejects(() => spawn.execute({ description: 'cancelled', can_delegate: false }, { agent: parent, signal: aborted.signal }), { name: 'AbortError' })
+  assert.equal(ctx.activations.length, beforeAbort, 'cancelled calls do not start a child')
+  pass('spawn and fork use flat activation fields, preserve inheritance and forward model/cwd/effort')
+}
+
+// --- J: an intentionally empty saved allowlist remains inherit-only --------
+{
+  const dir = home('saved-empty')
+  mkdirSync(join(dir, 'subagent-forge'), { recursive: true })
+  const file = join(dir, 'subagent-forge', 'config.json')
+  const text = JSON.stringify({ models: [] })
+  writeFileSync(file, text, 'utf8')
+  const ctx = makeCtx({ llm: fakeLlm })
+  forge.apply(ctx, baseConfig())
+  await tick()
+  assert.equal(readFileSync(file, 'utf8'), text)
+  assert.match(ctx.registered.get('spawn_agent').description, /none configured yet/u)
+  pass('a deliberately empty saved allowlist is not overwritten by discovery')
 }
 
 console.log(`\n${passed} checks passed`)
